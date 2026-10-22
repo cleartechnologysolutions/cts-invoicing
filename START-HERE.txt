@@ -1,0 +1,58 @@
+CLEAR TECHNOLOGY SOLUTIONS — INVOICING
+
+This ZIP is a prebuilt Cloudflare Worker. Do not run a framework build.
+The hosted private preview is a separate workspace/database from this installation.
+
+UPDATING AN EXISTING INSTALLATION
+Keep your existing wrangler.jsonc (with your real database ID), database, bucket,
+and runtime password. Replace the dist folder with this version and redeploy.
+No database migration is needed for this branding/product-sales update.
+Do not rerun initial CREATE TABLE SQL or create another database.
+
+FIRST-TIME CLOUDFLARE SETUP
+1. Create a D1 database named cts-invoicing-db. Copy its database ID.
+2. Create a PRIVATE R2 bucket named cts-invoicing-receipts. Do not enable public access.
+3. Edit wrangler.jsonc: replace REPLACE_WITH_YOUR_D1_DATABASE_ID with the real ID.
+4. In the D1 database console, run the SQL from migrations/0000_pale_invisible_woman.sql ONCE.
+   Alternatively, from this folder run:
+   npx wrangler d1 migrations apply cts-invoicing-db --remote --config wrangler.jsonc
+5. Upload all ZIP contents to the root of your GitHub repository.
+6. Connect a Cloudflare Worker to that repository.
+   Worker name: cts-invoicing
+   Build command: leave blank
+   Deploy command: npx wrangler deploy --config wrangler.jsonc
+7. In Worker SETTINGS > RUNTIME VARIABLES AND SECRETS, add:
+   Type: Secret
+   Name: ADMIN_PASSWORD
+   Value: a unique password of at least 12 characters.
+   Save/deploy the setting. This is a runtime secret, NOT a build variable.
+8. Open the Worker URL, sign in, and add your first customer.
+   You can then attach a custom domain in the Worker settings.
+
+BINDINGS
+DB     -> cts-invoicing-db (D1)
+BUCKET -> cts-invoicing-receipts (R2)
+The config declares these bindings. Keep their names unchanged.
+
+DATA & BACKUPS
+Backups > Download backup includes customer records, rates, invoices, purchases,
+and receipts. Store it privately. Restore is allowed only into an empty workspace.
+Browser restore supports up to 25 MB / 1,000 records including receipts.
+For larger backups use D1 SQL export plus an R2 copy; see FEATURES-AND-BACKUPS.md.
+Do not delete the database or bucket when deploying app updates.
+
+INVOICES
+Create a draft, review it, then finalize. Finalizing does NOT send an email.
+Print / PDF opens the browser print dialog. Choose Save as PDF and disable browser
+headers/footers for a clean invoice. Your cost and receipts stay internal.
+Mark paid records full payment; partial payments are not implemented.
+Tax is optional, defaults to zero, and applies to all lines at the entered percentage.
+
+UPDATES
+This package contains built dist files, including the authentication entry.js. The source/ folder is included
+for reference; changing source/ alone does not change the compiled application.
+Request a rebuilt package after code changes. Deploy with no build command.
+Do not store ADMIN_PASSWORD in this folder or in GitHub.
+
+Validation: TypeScript compilation, production build, calculation and API integration
+checks passed. Browser visual QA was unavailable in the authoring environment.

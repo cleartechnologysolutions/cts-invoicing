@@ -1,0 +1,9 @@
+{
+  "name": "cts-invoicing",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "npx wrangler deploy --config wrangler.jsonc"
+  }
+}

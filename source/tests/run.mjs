@@ -1,0 +1,48 @@
+import {DatabaseSync} from 'node:sqlite';
+import ts from 'typescript';
+import {readFileSync,mkdtempSync,writeFileSync,rmSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {pathToFileURL} from 'node:url';
+import assert from 'node:assert/strict';
+const temp=mkdtempSync(join(tmpdir(),'cts-tests-'));
+for(const file of ['billing-core','billing-api']){const src=readFileSync('lib/'+file+'.ts','utf8').replace("'./billing-core'","'./billing-core.mjs'");writeFileSync(join(temp,file+'.mjs'),ts.transpileModule(src,{compilerOptions:{module:ts.ModuleKind.ESNext,target:ts.ScriptTarget.ES2022}}).outputText)}
+const {api}=await import(pathToFileURL(join(temp,'billing-api.mjs')));
+const {invoice,customer,day,purchaseSales}=await import(pathToFileURL(join(temp,'billing-core.mjs')));
+function environment(){const sql=new DatabaseSync(':memory:');sql.exec(readFileSync('drizzle/0000_pale_invisible_woman.sql','utf8'));const files=new Map();const db={prepare(query){return {args:[],bind(...args){this.args=args;return this},async first(){return sql.prepare(query).get(...this.args)},async all(){return {results:sql.prepare(query).all(...this.args)}},async run(){const r=sql.prepare(query).run(...this.args);return {meta:{changes:Number(r.changes),last_row_id:Number(r.lastInsertRowid)}}}}},async batch(commands){sql.exec('BEGIN');try{const r=[];for(const c of commands)r.push(await c.run());sql.exec('COMMIT');return r}catch(e){sql.exec('ROLLBACK');throw e}}};return {DB:db,BUCKET:{async put(k,v,meta){files.set(k,new Uint8Array(v))},async get(k){const b=files.get(k);return b?{body:b,arrayBuffer:async()=>b.buffer}:null},async delete(k){files.delete(k)}}}}
+const env=environment();const request=async(path,method='GET',value,env1=env,headers={})=>{const req=new Request('https://test.local/api/billing/'+path,{method,headers:{Origin:'https://test.local',...headers},body:value instanceof FormData?value:value===undefined?undefined:JSON.stringify(value)});const response=await api(req,env1);const body=await response.json();return {status:response.status,body,response}};
+const c={name:'QA Test Company',contact:'Test Person',address:'123 Test St',mailDifferent:true,mailing:'PO Box 12',regular:15000,helpdesk:10000,afterhours:22500};
+const cid=(await request('customers','POST',c)).body.id;assert.ok(cid);
+const draft={customerId:cid,date:'2026-10-21',due:'2026-11-20',taxRate:0,notes:'Pay by check',lines:[{kind:'regular',description:'Engineering',quantity:1.25,unitPrice:15000},{kind:'helpdesk',description:'Support',quantity:0.5,unitPrice:10000},{kind:'afterhours',description:'After-hours work',quantity:2,unitPrice:22500},{kind:'product',description:'Switch',quantity:1,unitPrice:12599}]};
+assert.equal(invoice(draft).total,81349);assert.equal(invoice({...draft,lines:[{kind:'regular',description:'Rounding case',quantity:1.15,unitPrice:50}]}).total,58);assert.throws(()=>invoice({...draft,lines:[{...draft.lines[0],quantity:-1}]}));assert.throws(()=>day('2026-02-30'));assert.throws(()=>customer({...c,regular:-1}));
+const iid=(await request('invoices','POST',draft)).body.id;assert.equal(iid,1);
+assert.equal((await request('invoices/'+iid,'PATCH',{status:'issued'})).status,200);
+await request('customers','POST',{...c,id:cid,name:'Changed name',regular:20000});
+let all=(await request('data')).body;assert.equal(all.invoices[0].customer.name,'QA Test Company');assert.equal(all.invoices[0].total,81349);
+assert.equal((await request('invoices','POST',{...draft,id:iid})).status,400);
+assert.equal((await request('invoices/'+iid,'PATCH',{status:'paid'})).status,200);assert.equal((await request('invoices/'+iid,'PATCH',{status:'issued'})).status,400);
+const png=Uint8Array.from([137,80,78,71,13,10,26,10,0,0]);const form=new FormData();form.append('file',new File([png],'receipt.png',{type:'image/png'}));const receipt=(await request('receipts','POST',form)).body;assert.ok(receipt.id);
+const p={name:'Switch',date:'2026-10-21',quantity:1,unitCost:7500,unitPrice:12599,customerId:cid,receiptId:receipt.id};assert.equal((await request('purchases','POST',p)).status,200);
+// A purchase must belong to the invoice customer; actual invoice pricing drives markup.
+const product=(await request('data')).body.purchases[0];
+const linkedDraft={...draft,lines:[{kind:'product',description:'Switch resale',quantity:1,unitPrice:10000,purchaseId:product.id,unitCost:1}]};
+const saleId=(await request('invoices','POST',linkedDraft)).body.id;
+let salesData=(await request('data')).body;assert.equal(salesData.invoices.find(i=>i.id===saleId).lines[0].unitCost,7500);
+assert.equal(purchaseSales(product,salesData.invoices).hasSales,false);
+const otherCid=(await request('customers','POST',{...c,name:'Other customer'})).body.id;
+assert.equal((await request('invoices','POST',{...linkedDraft,customerId:otherCid})).status,400);
+assert.equal((await request('purchases','POST',{...product,customerId:otherCid})).status,400);
+assert.equal((await request('invoices/'+saleId,'PATCH',{status:'issued'})).status,200);
+salesData=(await request('data')).body;let sales=purchaseSales(product,salesData.invoices);assert.equal(sales.revenue,10000);assert.equal(sales.profit,2500);assert.ok(Math.abs(sales.markup-33.33333333333333)<.0001);
+await request('purchases','POST',{...product,unitCost:9000});
+assert.equal(purchaseSales({...product,unitCost:9000},salesData.invoices).cost,7500);
+assert.equal((await request('invoices/'+saleId,'PATCH',{status:'void'})).status,200);
+assert.equal(purchaseSales(product,(await request('data')).body.invoices).hasSales,false);
+assert.equal(purchaseSales({...product,unitCost:0},[{id:9,status:'issued',lines:[{purchaseId:product.id,quantity:1,unitPrice:500,amount:500,unitCost:0}]}]).markup,null);
+await request('purchases','POST',product);
+const backup=(await request('backup')).body;assert.equal(backup.receipts.length,1);assert.equal(backup.receipts[0].base64,btoa(String.fromCharCode(...png)));
+const restored=environment();assert.equal((await request('restore','POST',backup,restored)).status,200);const restoredData=(await request('data','GET',undefined,restored)).body;assert.equal(restoredData.invoices.find(i=>i.id===iid).total,81349);assert.equal(restoredData.invoices.find(i=>i.id===iid).status,'paid');assert.equal(restoredData.purchases[0].unitCost,7500);assert.equal((await request('restore','POST',backup,restored)).status,400);
+const next=(await request('invoices','POST',draft,restored)).body.id;assert.equal(next,saleId+1);
+assert.equal((await api(new Request('https://test.local/api/billing/customers',{method:'POST',body:JSON.stringify(c),headers:{origin:'https://other.local'}}),env)).status,403);
+const external={...env,APP_MODE:'external',ADMIN_PASSWORD:'test-password-for-unit-tests'};assert.equal((await request('data','GET',undefined,external)).status,401);const login=await request('session','POST',{password:external.ADMIN_PASSWORD},external);assert.equal(login.status,200);const cookie=login.response.headers.get('set-cookie').split(';')[0];assert.equal((await request('data','GET',undefined,external,{Cookie:cookie})).status,200);
+console.log('PASS: rate math, date validation, invoice snapshots, immutable finalized invoices, status transitions, receipt upload, full backup/restore, numbering after restore, cross-origin protection, external login.');rmSync(temp,{recursive:true,force:true});
