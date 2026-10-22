@@ -27,7 +27,7 @@
     {
       "binding": "DB",
       "database_name": "cts-invoicing-db",
-      "database_id": "REPLACE_WITH_YOUR_D1_DATABASE_ID",
+      "database_id": "5cb39212-e308-4ca9-b09e-0e8f154c64ae",
       "migrations_dir": "migrations"
     }
   ],
