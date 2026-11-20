@@ -33,3 +33,28 @@ Tests exercise invoice math, rounding, snapshots, finalized edit rejection, stat
 Purchases are assigned to a customer. Add a saved purchase to that customer's invoice and enter the unit sale price on the invoice line. The purchase record derives actual revenue, profit and markup from linked finalized/paid invoices; drafts are pending and void invoices are excluded. Markup = (sale revenue - cost of billed quantity) / cost of billed quantity × 100, excluding tax. Zero-cost sales display no percentage. Multiple invoice sales are aggregated with a quantity-weighted cost basis. Linked invoice lines snapshot unit cost when saved; later purchase-cost changes do not rewrite existing snapshots. Legacy invoice lines without a cost snapshot use the saved purchase cost.
 
 The invoice uses the CTS website's mountain/sun mark and forest-green, sage and sand palette, with a white print layout and branded footer.
+
+
+## Monthly time billing
+
+Time Entries stores customer, work date, description, regular/helpdesk/after-hours category,
+hours (up to 24 per entry, two decimal places), and a snapshot of the hourly rate.
+Choose a customer and check any unbilled entries, regardless of date, then choose Invoice selected entries. Existing invoice
+forms also have a checkbox list under Add unbilled time and an Add selected entries button. The time list defaults to Unbilled; switch status to review draft or closed time. Up to 500 lines per invoice are supported.
+Saved drafts reserve time; issued and paid invoices mark it billed/closed. Removing a line
+and saving, or voiding an invoice, releases its time. Billed entries are immutable.
+Database triggers atomically enforce one active invoice per time entry, including concurrent
+requests. Edits use version checks. Invoice lines include the work date and description.
+The app does not forbid multiple invoices in a month; monthly billing is a selectable workflow.
+Manual invoice lines remain available but are not connected to time entries.
+Backup format v2 includes time entries and invoice links; restore also accepts v1 backups.
+Restore reconstructs reservations from active invoice lines. Hosted migrations append 0001/0002.
+Existing Cloudflare installations must apply UPDATE-TIME-ENTRIES.sql before deploying.
+
+The checkbox selection update requires no additional database migration beyond 0001/0002.
+
+## Start/end time and timesheets
+New time entries use work date, start/end time and billing category. Hours round up per entry to the next 15 minutes. Mark Next day for overnight work (maximum 24 hours). Current customer rates are applied on save and snapshotted with the entry. Existing entries retain their saved hours and rates until edited; finalized invoices remain unchanged. Clock times and actual minutes are internal, excluded from invoice lines. Timesheets has rolling 48-hour, 7-day, 30-day and inclusive custom date filters, customer/status filters, CSV and print/PDF. Rolling periods use local work start times; legacy entries use work dates and have no actual-duration total. No new migration beyond the Time Entries migrations is needed.
+
+## Business expenses
+Business Expenses stores internal non-billable spending, optional related client, vendor, work purpose, category, total paid including tax, notes, and a receipt image/PDF. Upload, drop, or paste receipts (PNG/JPEG/WebP/PDF, 5 MB maximum). Expenses never become invoice lines or purchase records. Use Purchases for resale products and avoid entering the same spend twice. Filter by year/custom dates, client, category and search; export the filtered list as CSV. Archived expenses are recoverable and excluded from active totals. Category totals summarize recorded spending, not deductible tax amounts. Full backup version 3 includes expenses and all receipt files; restores still accept versions 1 and 2. This update adds one expenses table via migration 0003. Existing data is preserved.

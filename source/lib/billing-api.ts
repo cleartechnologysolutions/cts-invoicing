@@ -1,4 +1,4 @@
-import {customer,purchase,invoice,text,number} from './billing-core';
+import {customer,purchase,invoice,text,number,timeEntry,timeLine,expense} from './billing-core';
 const json=(v:any,status=200)=>Response.json(v,{status,headers:{'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
 const enc=new TextEncoder();
 async function sign(value:string,secret:string){const k=await crypto.subtle.importKey('raw',enc.encode(secret),{name:'HMAC',hash:'SHA-256'},false,['sign']);return [...new Uint8Array(await crypto.subtle.sign('HMAC',k,enc.encode(value)))].map(x=>x.toString(16).padStart(2,'0')).join('');}
@@ -19,9 +19,31 @@ export async function api(req:Request,env:any):Promise<Response>{
  }
  if(!await authorized(req,env))return json({error:'Sign in to access your invoices.'},401);
  const db=env.DB,bucket=env.BUCKET;if(!db||!bucket)return json({error:'Database or receipt storage is not configured.'},503);
- async function rows(table:string){const r=await db.prepare(`SELECT * FROM ${table} ORDER BY updated DESC`).all();return r.results.map((x:any)=>({...JSON.parse(x.data),id:x.id,updated:x.updated}));}
- async function get(table:string,id:string|number){const r=await db.prepare(`SELECT * FROM ${table} WHERE id=?`).bind(id).first();if(!r)throw new Error('Record not found.');return {...JSON.parse(r.data),id:r.id,updated:r.updated};}
- if(path[0]==='data'&&method==='GET'){const [customers,purchases,invoices]=await Promise.all(['customers','purchases','invoices'].map(rows));return json({customers,purchases,invoices});}
+ async function rows(table:string){const r=await db.prepare(`SELECT * FROM ${table} ORDER BY updated DESC`).all();return r.results.map((x:any)=>({...JSON.parse(x.data),id:x.id,updated:x.updated,...(table==='time_entries'?{invoiceId:x.invoice_id}:{})}));}
+ async function get(table:string,id:string|number){const r=await db.prepare(`SELECT * FROM ${table} WHERE id=?`).bind(id).first();if(!r)throw new Error('Record not found.');return {...JSON.parse(r.data),id:r.id,updated:r.updated,...(table==='time_entries'?{invoiceId:r.invoice_id}:{})};}
+ if(path[0]==='data'&&method==='GET'){const [customers,purchases,invoices,timeEntries,expenses]=await Promise.all(['customers','purchases','invoices','time_entries','expenses'].map(rows));return json({customers,purchases,invoices,timeEntries,expenses});}
+ if(path[0]==='expenses'&&method==='POST'){
+  const v:any=await req.json(),d=expense(v),id=v.id?text(v.id,80,true):crypto.randomUUID();
+  if(d.customerId)await get('customers',d.customerId);
+  if(d.receiptId&&!await db.prepare('SELECT id FROM receipts WHERE id=?').bind(d.receiptId).first())throw new Error('Receipt not found. Upload it again.');
+  if(v.id){const old=await get('expenses',id);const r=await db.prepare('UPDATE expenses SET data=?,updated=? WHERE id=? AND updated=?').bind(JSON.stringify(d),Math.max(Date.now(),old.updated+1),id,v.updated).run();if(!r.meta.changes)return json({error:'Expense changed in another window. Refresh before editing.'},409);}
+  else await db.prepare('INSERT INTO expenses(id,data,updated) VALUES(?,?,?)').bind(id,JSON.stringify(d),Date.now()).run();
+  return json({id});
+ }
+ if(path[0]==='time'&&method==='POST'){
+  const v:any=await req.json(),d=timeEntry(v),c=await get('customers',d.customerId),id=v.id?text(v.id,80,true):crypto.randomUUID();
+  d.unitPrice=c[d.kind];
+  if(!v.id&&!v.startTime)throw new Error('Enter start and end times for the time entry.');
+  if(v.id){const old=await get('time_entries',id);if(old.startTime&&!v.startTime)throw new Error('Keep both start and end times for this entry.');if(old.invoiceId)throw new Error('Remove this entry from its draft or void its invoice before editing.');
+   const r=await db.prepare('UPDATE time_entries SET data=?,updated=? WHERE id=? AND updated=? AND invoice_id IS NULL').bind(JSON.stringify(d),Math.max(Date.now(),old.updated+1),id,v.updated).run();
+   if(!r.meta.changes)return json({error:'Time entry changed or was added to an invoice. Refresh and try again.'},409);
+  }else await db.prepare('INSERT INTO time_entries(id,data,updated) VALUES(?,?,?)').bind(id,JSON.stringify(d),Date.now()).run();
+  return json({id});
+ }
+ if(path[0]==='time'&&path[1]&&method==='DELETE'){
+  const v:any=await req.json();const r=await db.prepare('DELETE FROM time_entries WHERE id=? AND updated=? AND invoice_id IS NULL').bind(path[1],v.updated).run();
+  if(!r.meta.changes)return json({error:'Only unchanged, unbilled time entries can be deleted. Refresh and try again.'},409);return json({ok:true});
+ }
  if(path[0]==='customers'&&method==='POST'){
   const v:any=await req.json(),id=v.id?text(v.id,80,true):crypto.randomUUID(),d=customer(v);
   await db.prepare('INSERT INTO customers(id,data,updated) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data,updated=excluded.updated').bind(id,JSON.stringify(d),Date.now()).run();return json({id});
@@ -39,11 +61,12 @@ export async function api(req:Request,env:any):Promise<Response>{
   const v:any=await req.json(),d=invoice(v),c=await get('customers',d.customerId),updated=Date.now();
   const previous=v.id?await get('invoices',v.id):null;if(previous&&previous.status!=='draft')throw new Error('Only draft invoices can be edited.');
   for(const l of d.lines){
+   if(l.timeEntryId){const t=await get('time_entries',l.timeEntryId);if(t.customerId!==d.customerId||t.invoiceId&&t.invoiceId!==previous?.id)throw new Error('Time entry belongs to another customer or invoice.');if(l.timeUpdated!==t.updated)throw new Error('Time entry changed. Remove it from the draft and add it again.');Object.assign(l,timeLine(t));l.amount=Math.round(Math.round(t.hours*100)*t.unitPrice/100);}
    if(l.purchaseId){const p=await get('purchases',l.purchaseId);if(l.kind!=='product'||p.customerId!==d.customerId)throw new Error('Linked products must belong to this invoice customer.');l.unitCost=p.unitCost;}
    else delete l.unitCost;
   }
-  const data={...d,customer:c,status:'draft',paidAt:null};
-  if(previous){const r=await db.prepare("UPDATE invoices SET data=?,updated=? WHERE id=? AND updated=?").bind(JSON.stringify(data),updated,v.id,v.updated).run();if(!r.meta.changes) return json({error:'This invoice changed in another window. Reload before editing.'},409);return json({id:v.id});}
+  const data={...invoice(d),customer:c,status:'draft',paidAt:null};
+  if(previous){const r=await db.prepare("UPDATE invoices SET data=?,updated=? WHERE id=? AND updated=?").bind(JSON.stringify(data),Math.max(updated,previous.updated+1),v.id,v.updated).run();if(!r.meta.changes) return json({error:'This invoice changed in another window. Reload before editing.'},409);return json({id:v.id});}
   const r=await db.prepare('INSERT INTO invoices(data,updated) VALUES(?,?)').bind(JSON.stringify(data),updated).run();return json({id:r.meta.last_row_id});
  }
  if(path[0]==='invoices'&&path[1]&&method==='PATCH'){
@@ -51,7 +74,7 @@ export async function api(req:Request,env:any):Promise<Response>{
   const transitions:any={draft:['issued','void'],issued:['paid','void'],paid:[],void:[]};if(!transitions[old.status]?.includes(v.status))throw new Error('This status change is not allowed.');
   if(v.status==='issued'){for(const l of old.lines){if(l.purchaseId){const p=await get('purchases',l.purchaseId);if(l.kind!=='product'||p.customerId!==old.customerId)throw new Error('A linked product belongs to another customer. Edit this draft before finalizing.');if(l.unitCost===undefined)l.unitCost=p.unitCost;}}}
   const {id,updated,...data}=old;data.status=v.status;if(v.status==='paid')data.paidAt=new Date().toISOString();
-  const r=await db.prepare('UPDATE invoices SET data=?,updated=? WHERE id=? AND updated=?').bind(JSON.stringify(data),Date.now(),id,updated).run();if(!r.meta.changes)return json({error:'Invoice changed. Refresh and try again.'},409);return json({id});
+  const r=await db.prepare('UPDATE invoices SET data=?,updated=? WHERE id=? AND updated=?').bind(JSON.stringify(data),Math.max(Date.now(),updated+1),id,updated).run();if(!r.meta.changes)return json({error:'Invoice changed. Refresh and try again.'},409);return json({id});
  }
  if(path[0]==='receipts'&&method==='POST'){
   const form=await req.formData(),file=form.get('file');if(!(file instanceof File)||!file.size||file.size>5*1024*1024)throw new Error('Choose an image or PDF under 5 MB.');
@@ -70,9 +93,9 @@ export async function api(req:Request,env:any):Promise<Response>{
   return new Response(obj.body,{headers:{'Content-Type':r.type,'Content-Disposition':`inline; filename="receipt.${r.type==='application/pdf'?'pdf':r.type.split('/')[1]}"`,'Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff','Content-Security-Policy':"sandbox"}});
  }
  if(path[0]==='backup'&&method==='GET'){
-  const [customers,purchases,invoices]=await Promise.all(['customers','purchases','invoices'].map(rows));const rr=(await db.prepare('SELECT * FROM receipts').all()).results;
+  const [customers,purchases,invoices,timeEntries,expenses]=await Promise.all(['customers','purchases','invoices','time_entries','expenses'].map(rows));const rr=(await db.prepare('SELECT * FROM receipts').all()).results;
   // Stream base64 receipts one at a time so the export does not buffer the archive.
-  const stream=new ReadableStream({async start(controller){try{controller.enqueue(enc.encode(JSON.stringify({format:'cts-billing',version:1,created:new Date().toISOString(),customers,purchases,invoices}).slice(0,-1)+',"receipts":['));
+  const stream=new ReadableStream({async start(controller){try{controller.enqueue(enc.encode(JSON.stringify({format:'cts-billing',version:3,created:new Date().toISOString(),customers,purchases,invoices,timeEntries,expenses}).slice(0,-1)+',"receipts":['));
    for(let i=0;i<rr.length;i++){const r=rr[i],obj=await bucket.get('receipts/'+r.id);if(!obj)throw new Error('Missing receipt '+r.id);const b=new Uint8Array(await obj.arrayBuffer());let s='';for(let j=0;j<b.length;j+=32768)s+=String.fromCharCode(...b.slice(j,j+32768));controller.enqueue(enc.encode((i?',':'')+JSON.stringify({...r,base64:btoa(s)})));}
    controller.enqueue(enc.encode(']}'));controller.close();}catch(e){controller.error(e);}}});
   return new Response(stream,{headers:{'Content-Type':'application/json','Content-Disposition':`attachment; filename="cts-backup-${new Date().toISOString().slice(0,10)}.json"`,'Cache-Control':'no-store'}});
@@ -80,14 +103,18 @@ export async function api(req:Request,env:any):Promise<Response>{
  if(path[0]==='restore'&&method==='POST'){
   if(Number(req.headers.get('content-length')||0)>25*1024*1024)throw new Error('Browser restore supports backups up to 25 MB. Use the documented migration method for larger backups.');
   const raw=await req.text();if(raw.length>25*1024*1024)throw new Error('Backup exceeds the 25 MB restore limit.');const b=JSON.parse(raw);
-  if(b.format!=='cts-billing'||b.version!==1||!['customers','purchases','invoices','receipts'].every(k=>Array.isArray(b[k])))throw new Error('Choose a valid CTS backup.');
-  if(b.customers.length+b.purchases.length+b.invoices.length+b.receipts.length>1000)throw new Error('Browser restore supports up to 1,000 records.');
-  const count=await db.prepare('SELECT (SELECT COUNT(*) FROM customers)+(SELECT COUNT(*) FROM invoices)+(SELECT COUNT(*) FROM purchases)+(SELECT COUNT(*) FROM receipts) AS n').first();if(count.n)throw new Error('Restore requires an empty database so existing work cannot be overwritten.');
+  if(b.format!=='cts-billing'||![1,2,3].includes(b.version)||!['customers','purchases','invoices','receipts'].every(k=>Array.isArray(b[k])))throw new Error('Choose a valid CTS backup.');
+  if(b.version===1)b.timeEntries=[];if(!Array.isArray(b.timeEntries))throw new Error('Backup is missing time entries.');
+  if(b.version<3)b.expenses=[];if(!Array.isArray(b.expenses))throw new Error('Backup is missing expenses.');
+  if(b.expenses.length+b.timeEntries.length+b.customers.length+b.purchases.length+b.invoices.length+b.receipts.length>1000)throw new Error('Browser restore supports up to 1,000 records.');
+  const count=await db.prepare('SELECT (SELECT COUNT(*) FROM customers)+(SELECT COUNT(*) FROM invoices)+(SELECT COUNT(*) FROM purchases)+(SELECT COUNT(*) FROM receipts)+(SELECT COUNT(*) FROM time_entries)+(SELECT COUNT(*) FROM expenses) AS n').first();if(count.n)throw new Error('Restore requires an empty database so existing work cannot be overwritten.');
   const ids=new Set<string>(),cids=new Set<string>();const commands:any[]=[]; const uploaded:string[]=[];
   const validId=(x:any)=>{if(typeof x!=='string'||!/^[-a-zA-Z0-9]{1,80}$/.test(x))throw new Error('Invalid record identifier.');return x;};
   for(const c of b.customers){const id=validId(c.id);if(cids.has(id))throw new Error('Duplicate customer.');cids.add(id);commands.push(db.prepare('INSERT INTO customers(id,data,updated) VALUES(?,?,?)').bind(id,JSON.stringify(customer(c)),Date.now()));}
   for(const r of b.receipts){validId(r.id);if(ids.has(r.id)||!['image/png','image/jpeg','image/webp','application/pdf'].includes(r.type)||typeof r.base64!=='string')throw new Error('Invalid receipt.');const bytes=Uint8Array.from(atob(r.base64),x=>x.charCodeAt(0));if(bytes.length!==r.size||bytes.length>5*1024*1024)throw new Error('Invalid receipt size.');ids.add(r.id);commands.push(db.prepare('INSERT INTO receipts(id,name,type,size) VALUES(?,?,?,?)').bind(r.id,text(r.name,200),r.type,r.size));}
   for(const p of b.purchases){const d=purchase(p);if(d.customerId&&!cids.has(d.customerId)||d.receiptId&&!ids.has(d.receiptId))throw new Error('Purchase references missing data.');commands.push(db.prepare('INSERT INTO purchases(id,data,updated) VALUES(?,?,?)').bind(validId(p.id),JSON.stringify(d),Date.now()));}
+  const eids=new Set<string>();for(const e of b.expenses){const d=expense(e),id=validId(e.id);if(eids.has(id)||d.customerId&&!cids.has(d.customerId)||d.receiptId&&!ids.has(d.receiptId))throw new Error('Expense references missing or duplicate data.');eids.add(id);commands.push(db.prepare('INSERT INTO expenses(id,data,updated) VALUES(?,?,?)').bind(id,JSON.stringify(d),Date.now()));}
+  const tids=new Set<string>();for(const t of b.timeEntries){const d=timeEntry(t),id=validId(t.id);if(tids.has(id)||!cids.has(d.customerId)||!Number.isSafeInteger(t.updated))throw new Error('Invalid time entry.');tids.add(id);commands.push(db.prepare('INSERT INTO time_entries(id,data,updated) VALUES(?,?,?)').bind(id,JSON.stringify(d),t.updated));}
   for(const i of b.invoices){const d=invoice(i);if(!Number.isSafeInteger(i.id)||i.id<1||!cids.has(d.customerId)||!['draft','issued','paid','void'].includes(i.status))throw new Error('Invalid invoice.');commands.push(db.prepare('INSERT INTO invoices(id,data,updated) VALUES(?,?,?)').bind(i.id,JSON.stringify({...d,customer:customer(i.customer),status:i.status,paidAt:i.paidAt?text(i.paidAt,40):null}),Date.now()));}
   if(!commands.length)return json({ok:true});
   try{for(const r of b.receipts){const key='receipts/'+r.id;await bucket.put(key,Uint8Array.from(atob(r.base64),x=>x.charCodeAt(0)),{httpMetadata:{contentType:r.type}});uploaded.push(key);}await db.batch(commands);}catch(e){for(const k of uploaded)await bucket.delete(k);throw e;}

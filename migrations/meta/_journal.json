@@ -8,6 +8,27 @@
       "when": 1792640011608,
       "tag": "0000_pale_invisible_woman",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1795125584706,
+      "tag": "0001_purple_blink",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1795125644924,
+      "tag": "0002_handy_kabuki",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1795151053605,
+      "tag": "0003_bouncy_stark_industries",
+      "breakpoints": true
     }
   ]
 }

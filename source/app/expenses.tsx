@@ -1,0 +1,48 @@
+'use client';
+import React,{useState} from 'react';
+import {expenseCategories} from '../lib/billing-core';
+const money=(n:number)=>new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(n/100);
+const localDate=()=>new Date().toLocaleDateString('en-CA');
+export const emptyExpense=()=>({date:localDate(),vendor:'',description:'',category:'Other',amount:0,customerId:'',receiptId:'',notes:'',archived:false});
+export function ExpenseForm({data,value,update,upload,busy,receiptName}:any){
+ const receive=(file:File|undefined)=>{if(file&&!busy)upload(file)};
+ return <><div className="form-grid">
+ <label className="field"><span>Expense date *</span><input required type="date" value={value.date} onChange={e=>update('date',e.target.value)}/></label>
+ <label className="field"><span>Vendor *</span><input autoFocus required maxLength={150} value={value.vendor} onChange={e=>update('vendor',e.target.value)} placeholder="Who you paid"/></label>
+ <label className="field wide"><span>Description / business purpose *</span><input required maxLength={500} value={value.description} onChange={e=>update('description',e.target.value)} placeholder="What the expense was for"/></label>
+ <label className="field"><span>Category *</span><select value={value.category} onChange={e=>update('category',e.target.value)}>{expenseCategories.map(c=><option key={c}>{c}</option>)}</select></label>
+ <label className="field"><span>Total paid (USD, including tax) *</span><div className="amount-input"><span>$</span><input required type="number" min="0.01" step="0.01" max="1000000" value={value.amount/100} onChange={e=>update('amount',Math.round(Number(e.target.value)*100))}/></div></label>
+ <label className="field wide"><span>Related client · optional, non-billable</span><select value={value.customerId} onChange={e=>update('customerId',e.target.value)}><option value="">General business expense</option>{data.customers.map((c:any)=><option key={c.id} value={c.id}>{c.name}</option>)}</select></label></div>
+ <p className="quiet expense-help">For internal records only. Selecting a client does not add this expense to their invoice. Use Purchases for products you plan to resell.</p>
+ <div className="receipt-drop" tabIndex={0} aria-label="Paste or drop expense receipt" onPaste={e=>{const file=[...e.clipboardData.files].find(f=>f.type.startsWith('image/'));if(file){e.preventDefault();receive(file)}}} onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();receive(e.dataTransfer.files[0])}}>
+ <strong>{busy?'Working…':value.receiptId?'Receipt attached':'Attach receipt or vendor invoice'}</strong><p>{receiptName||'Drop an image or PDF here, or click here and paste a screenshot.'}</p>
+ <div className="button-row"><label className="secondary upload-button">{value.receiptId?'Replace receipt':'Choose receipt'}<input type="file" accept="image/png,image/jpeg,image/webp,application/pdf" disabled={busy} onChange={e=>{receive(e.target.files?.[0]);e.target.value=''}}/></label>{value.receiptId&&<><a className="secondary" href={'/api/billing/receipts/'+value.receiptId} target="_blank" rel="noreferrer">View receipt</a><button type="button" className="text-button" disabled={busy} onClick={()=>update('receiptId','')}>Detach</button></>}</div><small>PNG, JPEG, WebP or PDF · Up to 5 MB · Optional · Included in full backups</small></div>
+ <label className="field"><span>Internal notes</span><textarea rows={3} maxLength={4000} value={value.notes} onChange={e=>update('notes',e.target.value)}/></label>
+ </>;
+}
+function csv(v:any){let s=String(v??'');if(/^\s*[=+@-]/.test(s))s="'"+s;return '"'+s.replaceAll('"','""')+'"'}
+export function Expenses({data,open,busy,onArchive}:any){
+ const year=String(new Date().getFullYear());
+ const [period,setPeriod]=useState(year),[from,setFrom]=useState(year+'-01-01'),[to,setTo]=useState(year+'-12-31'),[client,setClient]=useState('all'),[category,setCategory]=useState(''),[search,setSearch]=useState(''),[archived,setArchived]=useState(false);
+ const years=[...new Set([year,...data.expenses.map((e:any)=>e.date.slice(0,4))])].sort().reverse() as string[];
+ const invalid=period==='custom'&&(!from||!to||from>to);
+ const rows=data.expenses.filter((e:any)=>e.archived===archived&&(client==='all'||(client==='general'?!e.customerId:e.customerId===client))&&(!category||e.category===category)&&(!search||[e.vendor,e.description,e.notes].join(' ').toLowerCase().includes(search.toLowerCase()))&&(period==='all'||(period==='custom'?!invalid&&e.date>=from&&e.date<=to:e.date.startsWith(period+'-')))).sort((a:any,b:any)=>b.date.localeCompare(a.date)||b.updated-a.updated);
+ const total=rows.reduce((n:number,e:any)=>n+e.amount,0),missing=rows.filter((e:any)=>!e.receiptId).length;
+ const byCategory=expenseCategories.map(c=>({name:c,total:rows.filter((e:any)=>e.category===c).reduce((n:number,e:any)=>n+e.amount,0)})).filter(c=>c.total>0);
+ const clientName=(id:string)=>data.customers.find((c:any)=>c.id===id)?.name||'General business';
+ const exportCSV=()=>{const records=[['Date','Vendor','Business purpose','Category','Amount USD','Client (non-billable)','Receipt attached','Receipt ID','Notes','Archived'],...rows.map((e:any)=>[e.date,e.vendor,e.description,e.category,(e.amount/100).toFixed(2),clientName(e.customerId),e.receiptId?'Yes':'No',e.receiptId,e.notes,e.archived?'Yes':'No'])];const url=URL.createObjectURL(new Blob(['\ufeff'+records.map(r=>r.map(csv).join(',')).join('\r\n')],{type:'text/csv;charset=utf-8'}));const a=document.createElement('a');a.href=url;a.download='cts-business-expenses-'+localDate()+'.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)};
+ return <section className="panel time-panel expenses-panel"><div className="time-filters">
+ <label className="field"><span>Year / period</span><select value={period} onChange={e=>setPeriod(e.target.value)}>{years.map(y=><option key={y} value={y}>{y}</option>)}<option value="all">All dates</option><option value="custom">Custom dates</option></select></label>
+ {period==='custom'&&<><label className="field"><span>From</span><input type="date" value={from} max={to} onChange={e=>setFrom(e.target.value)}/></label><label className="field"><span>Through</span><input type="date" value={to} min={from} onChange={e=>setTo(e.target.value)}/></label></>}
+ <label className="field"><span>Client</span><select value={client} onChange={e=>setClient(e.target.value)}><option value="all">All clients / general</option><option value="general">General business only</option>{data.customers.map((c:any)=><option key={c.id} value={c.id}>{c.name}</option>)}</select></label>
+ <label className="field"><span>Category</span><select value={category} onChange={e=>setCategory(e.target.value)}><option value="">All categories</option>{expenseCategories.map(c=><option key={c}>{c}</option>)}</select></label>
+ <label className="field"><span>Records</span><select value={archived?'archived':'active'} onChange={e=>setArchived(e.target.value==='archived')}><option value="active">Active expenses</option><option value="archived">Archived expenses</option></select></label></div>
+ <div className="expense-toolbar"><label className="field"><span>Search expenses</span><input type="search" value={search} onChange={e=>setSearch(e.target.value)} placeholder="Vendor, purpose or notes"/></label><button className="secondary" disabled={!rows.length} onClick={exportCSV}>Download CSV</button></div>
+ {invalid&&<p role="alert">Choose a valid date range.</p>}
+ <div className="report-totals expense-totals"><div><span>{archived?'Archived':'Recorded'} expense total</span><strong>{money(total)}</strong></div><div><span>Entries in this view</span><strong>{rows.length}</strong></div><div><span>Without receipt</span><strong>{missing}</strong></div></div>
+ <p className="quiet expense-help">Totals reflect these filters. Categories organize records for tax preparation; totals are recorded spending, not calculated tax deductions. Product purchases are tracked separately and are not included here.</p>
+ {!!byCategory.length&&<details className="expense-breakdown"><summary>Totals by category</summary><dl>{byCategory.map(c=><div key={c.name}><dt>{c.name}</dt><dd>{money(c.total)}</dd></div>)}</dl></details>}
+ {rows.length?<div className="table-wrap"><table><thead><tr><th>Date / vendor</th><th>Business purpose</th><th>Category</th><th>Client · non-billable</th><th>Amount</th><th>Receipt</th><th>Actions</th></tr></thead><tbody>{rows.map((e:any)=><tr key={e.id}><td>{e.date}<small className="block">{e.vendor}</small></td><td className="time-description"><button className="text-button" onClick={()=>open('expenses',e)}>{e.description}</button></td><td>{e.category}</td><td>{clientName(e.customerId)}</td><td className="strong">{money(e.amount)}</td><td>{e.receiptId?<a className="text-button" href={'/api/billing/receipts/'+e.receiptId} target="_blank" rel="noreferrer">View receipt</a>:<span className="quiet">Not attached</span>}</td><td><div className="button-row"><button className="text-button" onClick={()=>open('expenses',e)}>Edit</button><button className="text-button" disabled={busy} onClick={()=>onArchive(e)}>{e.archived?'Restore':'Archive'}</button></div></td></tr>)}</tbody></table></div>:<div className="empty"><h3>No expenses in this view</h3><p>Add an expense or change the filters.</p><button className="primary" onClick={()=>open('expenses')}>Add expense</button></div>}
+ <p className="quiet expense-help">Archive removes an entry from active totals without deleting it. Receipts and archived entries remain in full backups. CSV exports the list; download a full backup to include receipt files.</p>
+ </section>;
+}

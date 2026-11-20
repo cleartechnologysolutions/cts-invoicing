@@ -1,0 +1,1 @@
+CREATE INDEX `time_entries_invoice_idx` ON `time_entries` (`invoice_id`);
